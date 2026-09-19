@@ -1,0 +1,4 @@
+[submodule "ailib"]
+	path = ailib
+	url = git@github.com:ksuchoi216/ailib.git
+	branch = develop
