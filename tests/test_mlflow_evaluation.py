@@ -78,3 +78,21 @@ def test_mlflow_run_failure_is_not_hidden(mlflow_boundary):
         evaluate_with_mlflow(
             ["q"], ["a"], ["r"], model="openai:/judge", on_error="record"
         )
+
+
+@pytest.mark.parametrize("inputs", [(["q"], [], ["r"]), ("q", ["a"], ["r"])])
+def test_direct_mlflow_call_validates_inputs_before_run(mlflow_boundary, inputs):
+    with pytest.raises((ValueError, TypeError)):
+        evaluate_with_mlflow(*inputs, model="openai:/judge")
+    mlflow_boundary.start_run.assert_not_called()
+
+
+def test_direct_mlflow_empty_input_skips_run(mlflow_boundary):
+    assert evaluate_with_mlflow([], [], [], model="openai:/judge") == ([], [])
+    mlflow_boundary.start_run.assert_not_called()
+
+
+def test_direct_mlflow_rejects_unknown_error_policy(mlflow_boundary):
+    with pytest.raises(ValueError, match="on_error"):
+        evaluate_with_mlflow(["q"], ["a"], ["r"], model="judge", on_error="ignore")
+    mlflow_boundary.start_run.assert_not_called()

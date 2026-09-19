@@ -1,55 +1,20 @@
 """질문, 생성 답변, 기준 답변을 네 가지 점수로 평가한다."""
 
 import logging
+import os
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from typing import Literal
 
 from .mlflow_evaluation import evaluate_with_mlflow
 from .prompts import ALLGANIZE_CORRECTNESS_PROMPT, TONIC_SIMILARITY_PROMPT
+from .results import EvaluationResult
+from .validation import validate_error_policy, validate_inputs
 
 logger = logging.getLogger(__name__)
 
 
 class EvaluationError(RuntimeError):
     """평가 모델 호출 또는 점수 해석에 실패했다."""
-
-
-@dataclass
-class EvaluationResult:
-    """입력 순서대로 저장한 점수. -1은 평가 실패를 나타낸다."""
-
-    tonic_similarity: list[int]
-    mlflow_similarity: list[float]
-    mlflow_correctness: list[float]
-    allganize_correctness: list[int]
-
-    def __post_init__(self) -> None:
-        lengths = {
-            len(self.tonic_similarity),
-            len(self.mlflow_similarity),
-            len(self.mlflow_correctness),
-            len(self.allganize_correctness),
-        }
-        if len(lengths) != 1:
-            raise ValueError("All score lists must have the same length.")
-
-    @property
-    def verdicts(self) -> list[str]:
-        """4표 중 3표 이상이 정답이면 O, 동점을 포함한 나머지는 X."""
-        verdicts = []
-        for tonic, similarity, correctness, allganize in zip(
-            self.tonic_similarity,
-            self.mlflow_similarity,
-            self.mlflow_correctness,
-            self.allganize_correctness,
-            strict=True,
-        ):
-            positive_votes = sum(
-                (tonic >= 4, similarity >= 4, correctness >= 4, allganize == 1)
-            )
-            verdicts.append("O" if positive_votes >= 3 else "X")
-        return verdicts
 
 
 class RAGEvaluator:
@@ -66,13 +31,47 @@ class RAGEvaluator:
         correctness_judge: Callable[[str], str],
         mlflow_model: str,
         on_error: Literal["raise", "record"] = "raise",
+        mlflow_evaluator: Callable[..., tuple[list[float], list[float]]] | None = None,
     ) -> None:
-        if on_error not in ("raise", "record"):
-            raise ValueError("on_error must be 'raise' or 'record'.")
+        validate_error_policy(on_error)
         self.similarity_judge = similarity_judge
         self.correctness_judge = correctness_judge
         self.mlflow_model = mlflow_model
         self.on_error = on_error
+        self.mlflow_evaluator = mlflow_evaluator
+
+    @classmethod
+    def from_env(
+        cls,
+        env_file: str | os.PathLike[str] = ".env",
+        *,
+        on_error: Literal["raise", "record"] = "raise",
+    ) -> "RAGEvaluator":
+        """.env를 읽어 구성한다. 기존 환경 변수가 파일 값보다 우선한다."""
+        validate_error_policy(on_error)
+        from dotenv import load_dotenv
+
+        load_dotenv(env_file, override=False)
+        required_settings = (
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "EVAL_OPENAI_MODEL",
+            "EVAL_ANTHROPIC_MODEL",
+        )
+        missing = [
+            name for name in required_settings if not os.environ.get(name, "").strip()
+        ]
+        if missing:
+            raise ValueError(f"Missing required settings: {', '.join(missing)}")
+
+        openai_model = os.environ["EVAL_OPENAI_MODEL"].strip()
+        mlflow_model = os.environ.get("EVAL_MLFLOW_MODEL", "").strip()
+        return cls.from_models(
+            openai_model=openai_model,
+            anthropic_model=os.environ["EVAL_ANTHROPIC_MODEL"].strip(),
+            mlflow_model=mlflow_model or f"openai:/{openai_model}",
+            on_error=on_error,
+        )
 
     @classmethod
     def from_models(
@@ -84,6 +83,7 @@ class RAGEvaluator:
         on_error: Literal["raise", "record"] = "raise",
     ) -> "RAGEvaluator":
         """환경 변수의 API 키로 노트북과 같은 모델 구성을 만든다."""
+        validate_error_policy(on_error)
         from langchain_anthropic import ChatAnthropic
         from langchain_core.output_parsers import StrOutputParser
         from langchain_openai import ChatOpenAI
@@ -104,17 +104,7 @@ class RAGEvaluator:
         reference_answers: Sequence[str],
     ) -> EvaluationResult:
         """동일한 길이의 문자열 목록을 평가하고 점수와 최종 판정을 반환한다."""
-        for name, values in (
-            ("questions", questions),
-            ("generated_answers", generated_answers),
-            ("reference_answers", reference_answers),
-        ):
-            if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
-                raise TypeError(f"{name} must be a sequence of strings.")
-            if any(not isinstance(value, str) for value in values):
-                raise TypeError(f"{name} must contain only strings.")
-        if not len(questions) == len(generated_answers) == len(reference_answers):
-            raise ValueError("All input lists must have the same length.")
+        validate_inputs(questions, generated_answers, reference_answers)
         if not questions:
             return EvaluationResult([], [], [], [])
 
@@ -126,7 +116,10 @@ class RAGEvaluator:
             metric="tonic_similarity",
             maximum=5,
         )
-        mlflow_similarity, mlflow_correctness = evaluate_with_mlflow(
+        mlflow_evaluator = self.mlflow_evaluator
+        if mlflow_evaluator is None:
+            mlflow_evaluator = evaluate_with_mlflow
+        mlflow_similarity, mlflow_correctness = mlflow_evaluator(
             questions,
             generated_answers,
             reference_answers,
@@ -178,3 +171,18 @@ class RAGEvaluator:
                 score = -1
             scores.append(score)
         return scores
+
+
+def main() -> None:
+    """현재 디렉터리의 .env로 한 건의 예시 평가를 실행한다."""
+    evaluator = RAGEvaluator.from_env()
+    result = evaluator.evaluate(
+        questions=["대한민국의 수도는?"],
+        generated_answers=["서울"],
+        reference_answers=["서울"],
+    )
+    print(result.verdicts)
+
+
+if __name__ == "__main__":
+    main()

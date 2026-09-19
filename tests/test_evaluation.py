@@ -1,4 +1,5 @@
 import itertools
+import runpy
 from unittest.mock import patch
 
 import pytest
@@ -127,3 +128,35 @@ def test_invalid_error_policy_is_rejected():
 def test_result_rejects_misaligned_scores():
     with pytest.raises(ValueError, match="length"):
         EvaluationResult([5], [], [5], [1])
+
+
+def test_mlflow_evaluator_can_be_injected():
+    def score_with_mlflow(questions, generated_answers, reference_answers, **options):
+        assert questions == ["q"]
+        assert generated_answers == ["a"]
+        assert reference_answers == ["r"]
+        assert options == {"model": "openai:/test-model", "on_error": "raise"}
+        return [2], [5]
+
+    evaluator = make_evaluator(mlflow_evaluator=score_with_mlflow)
+    result = evaluator.evaluate(["q"], ["a"], ["r"])
+    assert result.mlflow_similarity == [2]
+    assert result.mlflow_correctness == [5]
+    assert result.verdicts == ["O"]
+
+
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), 6, True, "5"])
+def test_result_rejects_invalid_scores(score):
+    with pytest.raises(ValueError, match="tonic_similarity"):
+        EvaluationResult([score], [5], [5], [1])
+
+
+def test_recorded_failure_remains_a_negative_vote():
+    assert EvaluationResult([-1], [5], [3], [1]).verdicts == ["X"]
+
+
+def test_package_example_runs_with_injected_evaluator(capsys):
+    evaluator = make_evaluator(mlflow_evaluator=lambda *args, **kwargs: ([5], [5]))
+    with patch.object(RAGEvaluator, "from_env", return_value=evaluator):
+        runpy.run_module("rag_evaluation", run_name="__main__")
+    assert capsys.readouterr().out == "['O']\n"

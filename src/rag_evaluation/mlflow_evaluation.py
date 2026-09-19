@@ -5,6 +5,8 @@ import math
 from collections.abc import Sequence
 from typing import Literal
 
+from .validation import validate_error_policy, validate_inputs
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,6 +23,11 @@ def evaluate_with_mlflow(
     MLflow 실행 및 저장 실패는 그대로 전파한다. 개별 누락/비정상 점수는
     on_error='record'일 때만 -1로 변환한다.
     """
+    validate_error_policy(on_error)
+    validate_inputs(questions, generated_answers, reference_answers)
+    if not questions:
+        return [], []
+
     import mlflow
     import pandas as pd
     from mlflow.metrics.genai import answer_correctness, answer_similarity
@@ -48,7 +55,7 @@ def evaluate_with_mlflow(
     if len(table) != len(questions):
         raise ValueError("MLflow returned a different number of rows.")
 
-    score_columns = []
+    score_columns = {}
     for metric in ("answer_similarity", "answer_correctness"):
         scores = []
         for index, value in enumerate(table[f"{metric}/v1/score"].tolist()):
@@ -63,5 +70,5 @@ def evaluate_with_mlflow(
                 logger.warning(message)
                 score = -1.0
             scores.append(score)
-        score_columns.append(scores)
-    return score_columns[0], score_columns[1]
+        score_columns[metric] = scores
+    return score_columns["answer_similarity"], score_columns["answer_correctness"]
