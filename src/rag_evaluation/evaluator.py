@@ -173,16 +173,16 @@ class RAGEvaluator:
         return scores
 
 
-def main() -> None:
-    """현재 디렉터리의 .env로 한 건의 예시 평가를 실행한다."""
-    evaluator = RAGEvaluator.from_env()
-    result = evaluator.evaluate(
-        questions=["대한민국의 수도는?"],
-        generated_answers=["서울"],
-        reference_answers=["서울"],
-    )
-    print(result.verdicts)
-
-
 if __name__ == "__main__":
+
+    def main() -> None:
+        """현재 디렉터리의 .env로 한 건의 예시 평가를 실행한다."""
+        evaluator = RAGEvaluator.from_env()
+        result = evaluator.evaluate(
+            questions=["대한민국의 수도는?"],
+            generated_answers=["서울"],
+            reference_answers=["서울"],
+        )
+        print(result.verdicts)
+
     main()
