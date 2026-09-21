@@ -15,6 +15,7 @@ def clean_environment(monkeypatch):
         "EVAL_ANTHROPIC_MODEL",
         "EVAL_MLFLOW_MODEL",
         "MLFLOW_TRACKING_URI",
+        "mlflow_url",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(os, "environ", os.environ.copy())
@@ -76,3 +77,42 @@ def test_environment_only_works_without_dotenv_file(tmp_path, monkeypatch):
     with patch.object(RAGEvaluator, "from_models") as factory:
         RAGEvaluator.from_env(tmp_path / "missing.env")
     assert factory.call_args.kwargs["openai_model"] == "configured"
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("localhost:30001", "http://localhost:30001"),
+        ("http://localhost:30001", "http://localhost:30001"),
+        ("https://mlflow.example.com", "https://mlflow.example.com"),
+    ],
+)
+def test_mlflow_url_becomes_tracking_uri(tmp_path, monkeypatch, url, expected):
+    for name in (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "EVAL_OPENAI_MODEL",
+        "EVAL_ANTHROPIC_MODEL",
+    ):
+        monkeypatch.setenv(name, "configured")
+    path = tmp_path / ".env"
+    path.write_text(f"mlflow_url={url}\n")
+    with patch.object(RAGEvaluator, "from_models"):
+        RAGEvaluator.from_env(path)
+    assert os.environ["MLFLOW_TRACKING_URI"] == expected
+
+
+def test_explicit_tracking_uri_takes_priority(tmp_path, monkeypatch):
+    for name in (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "EVAL_OPENAI_MODEL",
+        "EVAL_ANTHROPIC_MODEL",
+    ):
+        monkeypatch.setenv(name, "configured")
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://existing-server:5000")
+    path = tmp_path / ".env"
+    path.write_text("mlflow_url=localhost:30001\n")
+    with patch.object(RAGEvaluator, "from_models"):
+        RAGEvaluator.from_env(path)
+    assert os.environ["MLFLOW_TRACKING_URI"] == "http://existing-server:5000"

@@ -25,8 +25,10 @@ cp .env.example .env
 
 `EVAL_MLFLOW_MODEL`은 선택 항목이며, 비워두면
 `openai:/{EVAL_OPENAI_MODEL}`을 사용합니다. MLflow 저장 위치는 필요하면
-`MLFLOW_TRACKING_URI`로 지정합니다. 지정하지 않으면 MLflow 기본 저장소를
-사용합니다. `.env`는 Git에서 제외되며 `.env.example`만 공유합니다.
+`mlflow_url=localhost:30001`로 지정합니다. 스킴이 없으면 `http://`를
+붙여 MLflow의 `MLFLOW_TRACKING_URI` 환경 변수에 적용합니다. 이미 설정된
+`MLFLOW_TRACKING_URI`가 있으면 그 값을 우선합니다. 둘 다 없으면 MLflow
+기본 저장소를 사용합니다. `.env`는 Git에서 제외되며 `.env.example`만 공유합니다.
 
 ## 사용 예시
 
