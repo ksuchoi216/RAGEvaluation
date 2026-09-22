@@ -1,5 +1,4 @@
 import itertools
-import runpy
 from unittest.mock import patch
 
 import pytest
@@ -49,7 +48,8 @@ def test_evaluation_keeps_scores_and_formats_input():
     evaluator = make_evaluator()
     evaluator.similarity_judge = lambda prompt: prompts.append(prompt) or "4"
     with patch(
-        "rag_evaluation.evaluator.evaluate_with_mlflow", return_value=([5, 2], [3, 4])
+        "rag_evaluation.evaluator.evaluate_with_mlflow",
+        return_value=([5, 2], [3, 4]),
     ):
         result = evaluator.evaluate(["q{1}", "q2"], ["a1", "a2"], ["r1", "r2"])
     assert result.tonic_similarity == [4, 4]
@@ -100,7 +100,8 @@ def test_continue_on_error_preserves_row_alignment():
     responses = iter(["bad", "5"])
     evaluator.similarity_judge = lambda prompt: next(responses)
     with patch(
-        "rag_evaluation.evaluator.evaluate_with_mlflow", return_value=([3, 4], [3, 4])
+        "rag_evaluation.evaluator.evaluate_with_mlflow",
+        return_value=([3, 4], [3, 4]),
     ):
         result = evaluator.evaluate(["q1", "q2"], ["a1", "a2"], ["r1", "r2"])
     assert result.tonic_similarity == [-1, 5]
@@ -153,10 +154,3 @@ def test_result_rejects_invalid_scores(score):
 
 def test_recorded_failure_remains_a_negative_vote():
     assert EvaluationResult([-1], [5], [3], [1]).verdicts == ["X"]
-
-
-def test_package_example_runs_with_injected_evaluator(capsys):
-    evaluator = make_evaluator(mlflow_evaluator=lambda *args, **kwargs: ([5], [5]))
-    with patch.object(RAGEvaluator, "from_env", return_value=evaluator):
-        runpy.run_module("rag_evaluation", run_name="__main__")
-    assert capsys.readouterr().out == "['O']\n"

@@ -5,6 +5,8 @@ import os
 from collections.abc import Callable, Sequence
 from typing import Literal
 
+from dotenv import load_dotenv
+
 from .mlflow_evaluation import evaluate_with_mlflow
 from .prompts import ALLGANIZE_CORRECTNESS_PROMPT, TONIC_SIMILARITY_PROMPT
 from .results import EvaluationResult
@@ -18,7 +20,11 @@ class EvaluationError(RuntimeError):
 
 
 class RAGEvaluator:
-    """프롬프트를 받아 문자열을 반환하는 평가 함수를 주입받는다.
+    """선택한 모델 제공자로 네 가지 답변 평가 점수를 계산한다.
+
+    RAGEvaluator()는 Claude Haiku를, model_provider="openai"는 GPT nano를 쓴다.
+    .env에서 API 키를 읽으며 기존 환경 변수는 덮어쓰지 않는다.
+    테스트에서는 similarity_judge와 correctness_judge를 직접 주입할 수 있다.
 
     on_error='raise'는 첫 평가 실패에서 중단한다. 'record'는 개별 점수
     실패를 -1로 기록한다. MLflow 실행 전체의 실패는 항상 예외로 전달한다.
@@ -26,82 +32,51 @@ class RAGEvaluator:
 
     def __init__(
         self,
+        model_provider: Literal["claude", "openai", "local"] = "claude",
         *,
-        similarity_judge: Callable[[str], str],
-        correctness_judge: Callable[[str], str],
-        mlflow_model: str,
+        env_file: str | os.PathLike[str] = ".env",
         on_error: Literal["raise", "record"] = "raise",
+        similarity_judge: Callable[[str], str] | None = None,
+        correctness_judge: Callable[[str], str] | None = None,
+        mlflow_model: str | None = None,
         mlflow_evaluator: Callable[..., tuple[list[float], list[float]]] | None = None,
     ) -> None:
         validate_error_policy(on_error)
-        self.similarity_judge = similarity_judge
-        self.correctness_judge = correctness_judge
-        self.mlflow_model = mlflow_model
-        self.on_error = on_error
-        self.mlflow_evaluator = mlflow_evaluator
-
-    @classmethod
-    def from_env(
-        cls,
-        env_file: str | os.PathLike[str] = ".env",
-        *,
-        on_error: Literal["raise", "record"] = "raise",
-    ) -> "RAGEvaluator":
-        """.env를 읽어 구성한다. 기존 환경 변수가 파일 값보다 우선한다."""
-        validate_error_policy(on_error)
-        from dotenv import load_dotenv
+        if model_provider == "local":
+            raise NotImplementedError("model_provider='local' is not supported yet.")
+        if model_provider not in ("claude", "openai"):
+            raise ValueError("model_provider must be 'claude', 'openai', or 'local'.")
 
         load_dotenv(env_file, override=False)
-        required_settings = (
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "EVAL_OPENAI_MODEL",
-            "EVAL_ANTHROPIC_MODEL",
+
+        model_name = (
+            "claude-haiku-4-5" if model_provider == "claude" else "gpt-4.1-nano"
         )
-        missing = [
-            name for name in required_settings if not os.environ.get(name, "").strip()
-        ]
-        if missing:
-            raise ValueError(f"Missing required settings: {', '.join(missing)}")
+        mlflow_provider = "anthropic" if model_provider == "claude" else "openai"
+        self.model_provider = model_provider
+        self.model = None
+        if similarity_judge is None or correctness_judge is None:
+            from langchain_core.output_parsers import StrOutputParser
 
-        mlflow_url = os.environ.get("mlflow_url", "").strip()
-        if mlflow_url and not os.environ.get("MLFLOW_TRACKING_URI", "").strip():
-            if "://" not in mlflow_url:
-                mlflow_url = f"http://{mlflow_url}"
-            os.environ["MLFLOW_TRACKING_URI"] = mlflow_url
+            if model_provider == "claude":
+                from langchain_anthropic import ChatAnthropic
 
-        openai_model = os.environ["EVAL_OPENAI_MODEL"].strip()
-        mlflow_model = os.environ.get("EVAL_MLFLOW_MODEL", "").strip()
-        return cls.from_models(
-            openai_model=openai_model,
-            anthropic_model=os.environ["EVAL_ANTHROPIC_MODEL"].strip(),
-            mlflow_model=mlflow_model or f"openai:/{openai_model}",
-            on_error=on_error,
-        )
+                self.model = ChatAnthropic(model=model_name, temperature=0)
+            else:
+                from langchain_openai import ChatOpenAI
 
-    @classmethod
-    def from_models(
-        cls,
-        *,
-        openai_model: str,
-        anthropic_model: str,
-        mlflow_model: str,
-        on_error: Literal["raise", "record"] = "raise",
-    ) -> "RAGEvaluator":
-        """환경 변수의 API 키로 노트북과 같은 모델 구성을 만든다."""
-        validate_error_policy(on_error)
-        from langchain_anthropic import ChatAnthropic
-        from langchain_core.output_parsers import StrOutputParser
-        from langchain_openai import ChatOpenAI
+                self.model = ChatOpenAI(model=model_name, temperature=0)
+            judge = (self.model | StrOutputParser()).invoke
+            if similarity_judge is None:
+                similarity_judge = judge
+            if correctness_judge is None:
+                correctness_judge = judge
 
-        similarity_chain = ChatOpenAI(model=openai_model) | StrOutputParser()
-        correctness_chain = ChatAnthropic(model=anthropic_model) | StrOutputParser()
-        return cls(
-            similarity_judge=similarity_chain.invoke,
-            correctness_judge=correctness_chain.invoke,
-            mlflow_model=mlflow_model,
-            on_error=on_error,
-        )
+        self.similarity_judge = similarity_judge
+        self.correctness_judge = correctness_judge
+        self.mlflow_model = mlflow_model or f"{mlflow_provider}:/{model_name}"
+        self.on_error = on_error
+        self.mlflow_evaluator = mlflow_evaluator
 
     def evaluate(
         self,
@@ -177,18 +152,3 @@ class RAGEvaluator:
                 score = -1
             scores.append(score)
         return scores
-
-
-def main() -> None:
-    """현재 디렉터리의 .env로 한 건의 예시 평가를 실행한다."""
-    evaluator = RAGEvaluator.from_env()
-    result = evaluator.evaluate(
-        questions=["대한민국의 수도는?"],
-        generated_answers=["서울"],
-        reference_answers=["서울"],
-    )
-    print(result.verdicts)
-
-
-if __name__ == "__main__":
-    main()

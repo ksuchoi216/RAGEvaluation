@@ -1,13 +1,15 @@
 import os
-from unittest.mock import patch
 
 import pytest
+from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
 
 from rag_evaluation import RAGEvaluator
 
 
 @pytest.fixture(autouse=True)
-def clean_environment(monkeypatch):
+def clean_environment(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     for name in (
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
@@ -18,101 +20,98 @@ def clean_environment(monkeypatch):
         "mlflow_url",
     ):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(os, "environ", os.environ.copy())
-
-
-def test_loads_dotenv_from_working_directory(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text(
         "OPENAI_API_KEY=test-openai\nANTHROPIC_API_KEY=test-anthropic\n"
-        "EVAL_OPENAI_MODEL=openai-judge\nEVAL_ANTHROPIC_MODEL=claude-judge\n"
-        "MLFLOW_TRACKING_URI=http://localhost:5000\n"
     )
-    with patch.object(RAGEvaluator, "from_models") as factory:
-        evaluator = RAGEvaluator.from_env(on_error="record")
-    assert evaluator is factory.return_value
-    factory.assert_called_once_with(
-        openai_model="openai-judge",
-        anthropic_model="claude-judge",
-        mlflow_model="openai:/openai-judge",
-        on_error="record",
-    )
+
+
+def test_default_constructor_loads_keys_and_selects_claude():
+    evaluator = RAGEvaluator()
+    assert isinstance(evaluator.model, ChatAnthropic)
+    assert evaluator.model.model == "claude-haiku-4-5"
+    assert evaluator.model.anthropic_api_key.get_secret_value() == "test-anthropic"
+    assert evaluator.mlflow_model == "anthropic:/claude-haiku-4-5"
     assert os.environ["OPENAI_API_KEY"] == "test-openai"
-    assert os.environ["MLFLOW_TRACKING_URI"] == "http://localhost:5000"
 
 
-def test_environment_overrides_explicit_dotenv_path(tmp_path, monkeypatch):
-    path = tmp_path / "custom.env"
-    path.write_text(
-        "OPENAI_API_KEY=file-key\nANTHROPIC_API_KEY=test-anthropic\n"
-        "EVAL_OPENAI_MODEL=file-model\nEVAL_ANTHROPIC_MODEL=claude-judge\n"
-        "EVAL_MLFLOW_MODEL=openai:/separate-judge\n"
-    )
-    monkeypatch.setenv("OPENAI_API_KEY", "environment-key")
-    monkeypatch.setenv("EVAL_OPENAI_MODEL", "environment-model")
-    with patch.object(RAGEvaluator, "from_models") as factory:
-        RAGEvaluator.from_env(path)
-    assert os.environ["OPENAI_API_KEY"] == "environment-key"
-    assert factory.call_args.kwargs["openai_model"] == "environment-model"
-    assert factory.call_args.kwargs["mlflow_model"] == "openai:/separate-judge"
+def test_openai_provider_does_not_require_anthropic_key(tmp_path):
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=test-openai\n")
+    evaluator = RAGEvaluator(model_provider="openai")
+    assert isinstance(evaluator.model, ChatOpenAI)
+    assert evaluator.model.model_name == "gpt-4.1-nano"
+    assert evaluator.mlflow_model == "openai:/gpt-4.1-nano"
 
 
-def test_missing_settings_fail_before_model_creation(tmp_path):
-    path = tmp_path / ".env"
-    path.write_text("OPENAI_API_KEY=\nEVAL_OPENAI_MODEL=   \n")
-    with patch.object(RAGEvaluator, "from_models") as factory:
-        with pytest.raises(ValueError, match="OPENAI_API_KEY.*EVAL_OPENAI_MODEL"):
-            RAGEvaluator.from_env(path)
-    factory.assert_not_called()
+def test_existing_environment_takes_priority(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "existing-key")
+    evaluator = RAGEvaluator(model_provider="openai")
+    assert evaluator.model.openai_api_key.get_secret_value() == "existing-key"
 
 
-def test_environment_only_works_without_dotenv_file(tmp_path, monkeypatch):
-    for name in (
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "EVAL_OPENAI_MODEL",
-        "EVAL_ANTHROPIC_MODEL",
-    ):
-        monkeypatch.setenv(name, "configured")
-    with patch.object(RAGEvaluator, "from_models") as factory:
-        RAGEvaluator.from_env(tmp_path / "missing.env")
-    assert factory.call_args.kwargs["openai_model"] == "configured"
+@pytest.mark.parametrize("option", ["model_provider"])
+def test_local_provider_is_not_implemented(option):
+    with pytest.raises(NotImplementedError, match=option):
+        RAGEvaluator(**{option: "local"})
+
+
+@pytest.mark.parametrize("option", ["model_provider"])
+def test_unknown_provider_is_rejected(option):
+    with pytest.raises(ValueError, match=option):
+        RAGEvaluator(**{option: "unknown"})
+
+
+def test_constructor_does_not_configure_mlflow_tracking(monkeypatch):
+    monkeypatch.setenv("mlflow_url", "localhost:30001")
+    RAGEvaluator()
+    assert "MLFLOW_TRACKING_URI" not in os.environ
+
+
+def test_claude_provider_does_not_require_openai_key(tmp_path):
+    (tmp_path / ".env").write_text("ANTHROPIC_API_KEY=test-anthropic\n")
+    evaluator = RAGEvaluator()
+    assert evaluator.model.anthropic_api_key.get_secret_value() == "test-anthropic"
+    assert evaluator.mlflow_model.startswith("anthropic:/")
 
 
 @pytest.mark.parametrize(
-    "url, expected",
+    "provider, model_class, model_uri",
     [
-        ("localhost:30001", "http://localhost:30001"),
-        ("http://localhost:30001", "http://localhost:30001"),
-        ("https://mlflow.example.com", "https://mlflow.example.com"),
+        ("claude", ChatAnthropic, "anthropic:/claude-haiku-4-5"),
+        ("openai", ChatOpenAI, "openai:/gpt-4.1-nano"),
     ],
 )
-def test_mlflow_url_becomes_tracking_uri(tmp_path, monkeypatch, url, expected):
-    for name in (
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "EVAL_OPENAI_MODEL",
-        "EVAL_ANTHROPIC_MODEL",
+def test_selected_provider_drives_all_four_metrics(
+    monkeypatch, provider, model_class, model_uri
+):
+    from langchain_core.messages import AIMessage
+
+    responses = iter(["5", "1"])
+    monkeypatch.setattr(
+        model_class,
+        "invoke",
+        lambda *args, **kwargs: AIMessage(content=next(responses)),
+    )
+
+    def score_mlflow(
+        questions, generated_answers, reference_answers, *, model, on_error
     ):
-        monkeypatch.setenv(name, "configured")
-    path = tmp_path / ".env"
-    path.write_text(f"mlflow_url={url}\n")
-    with patch.object(RAGEvaluator, "from_models"):
-        RAGEvaluator.from_env(path)
-    assert os.environ["MLFLOW_TRACKING_URI"] == expected
+        assert model == model_uri
+        assert (questions, generated_answers, reference_answers) == (
+            ["q"],
+            ["a"],
+            ["r"],
+        )
+        return [5], [5]
+
+    evaluator = RAGEvaluator(model_provider=provider, mlflow_evaluator=score_mlflow)
+    result = evaluator.evaluate(["q"], ["a"], ["r"])
+    assert result.verdicts == ["O"]
+    assert result.tonic_similarity == [5]
+    assert result.allganize_correctness == [1]
 
 
-def test_explicit_tracking_uri_takes_priority(tmp_path, monkeypatch):
-    for name in (
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "EVAL_OPENAI_MODEL",
-        "EVAL_ANTHROPIC_MODEL",
-    ):
-        monkeypatch.setenv(name, "configured")
-    monkeypatch.setenv("MLFLOW_TRACKING_URI", "http://existing-server:5000")
-    path = tmp_path / ".env"
-    path.write_text("mlflow_url=localhost:30001\n")
-    with patch.object(RAGEvaluator, "from_models"):
-        RAGEvaluator.from_env(path)
-    assert os.environ["MLFLOW_TRACKING_URI"] == "http://existing-server:5000"
+def test_explicit_env_file_is_loaded(tmp_path):
+    path = tmp_path / "custom.env"
+    path.write_text("OPENAI_API_KEY=custom-key\n")
+    evaluator = RAGEvaluator(model_provider="openai", env_file=path)
+    assert evaluator.model.openai_api_key.get_secret_value() == "custom-key"

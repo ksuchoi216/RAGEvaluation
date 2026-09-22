@@ -12,33 +12,27 @@ Python 3.10 이상에서 저장소 루트 기준으로 실행합니다.
 pip install -e .
 ```
 
-처음 설정할 때 예제 파일을 복사하고 `.env`의 필수 항목 네 개를 채웁니다.
+예제 파일을 복사하고 사용할 제공자의 API 키를 입력합니다.
 
 ```bash
 cp .env.example .env
 ```
 
-- `OPENAI_API_KEY`: OpenAI API 키
-- `ANTHROPIC_API_KEY`: Anthropic API 키
-- `EVAL_OPENAI_MODEL`: 유사성 평가에 사용할 OpenAI 모델명
-- `EVAL_ANTHROPIC_MODEL`: 정확성 평가에 사용할 Claude 모델명
+- `ANTHROPIC_API_KEY`: 기본 Claude 평가 모델을 사용할 때 필요합니다.
+- `OPENAI_API_KEY`: OpenAI 평가 모델을 사용할 때 필요합니다.
 
-`EVAL_MLFLOW_MODEL`은 선택 항목이며, 비워두면
-`openai:/{EVAL_OPENAI_MODEL}`을 사용합니다. MLflow 저장 위치는 필요하면
-`mlflow_url=localhost:30001`로 지정합니다. 스킴이 없으면 `http://`를
-붙여 MLflow의 `MLFLOW_TRACKING_URI` 환경 변수에 적용합니다. 이미 설정된
-`MLFLOW_TRACKING_URI`가 있으면 그 값을 우선합니다. 둘 다 없으면 MLflow
-기본 저장소를 사용합니다. `.env`는 Git에서 제외되며 `.env.example`만 공유합니다.
+`.env`에는 API 키만 설정하면 됩니다. 모델 이름이나 `mlflow_url`은 필요하지
+않습니다. `.env`는 Git에서 제외되며 `.env.example`만 공유합니다.
 
 ## 사용 예시
 
-저장소 루트에서 아래 코드를 실행합니다. `from_env()`는 현재 작업 디렉터리의
+저장소 루트에서 아래 코드를 실행합니다. `RAGEvaluator()`는 현재 작업 디렉터리의
 `.env`를 읽습니다. 이미 설정된 환경 변수는 덮어쓰지 않습니다.
 
 ```python
 from rag_evaluation import RAGEvaluator
 
-evaluator = RAGEvaluator.from_env()
+evaluator = RAGEvaluator(model_provider="claude")
 
 result = evaluator.evaluate(
     questions=["대한민국의 수도는 어디인가요?"],
@@ -53,20 +47,21 @@ print(result.mlflow_correctness)    # 1~5점
 print(result.allganize_correctness) # 0 또는 1
 ```
 
-다른 디렉터리나 노트북에서 실행하면 `RAGEvaluator.from_env("../.env")`처럼
+다른 디렉터리나 노트북에서는 `RAGEvaluator(env_file="../.env")`처럼
 파일 경로를 지정할 수 있습니다. 파일 없이 환경 변수만 설정해도 동작합니다.
-필수 값이 없거나 비어 있으면 모델 생성 전에 누락된 설정 이름을 알려줍니다.
-모델명을 코드에서 직접 전달하려면 기존 `RAGEvaluator.from_models(...)`를
-사용합니다.
 
-`.env` 설정 후 프로젝트 루트에서 예시 한 건을 바로 실행할 수도 있습니다.
-이 명령은 실제 평가 API를 호출합니다.
+`model_provider`는 `"claude"`(기본값), `"openai"`, `"local"`을 받습니다.
+Claude는 `claude-haiku-4-5`, OpenAI는 `gpt-4.1-nano`를 사용합니다.
+선택한 제공자는 네 가지 평가 지표 모두에 적용됩니다. `"local"`은 아직
+지원하지 않아 `NotImplementedError`를 발생시킵니다. 임베딩은 사용하지 않습니다.
 
-```bash
-PYTHONPATH=src python -m rag_evaluation
+```python
+evaluator = RAGEvaluator()  # Claude 기본값
+evaluator = RAGEvaluator(model_provider="openai")
 ```
 
-실행 예시 본문은 `evaluator.py`의 `main()`에 있습니다.
+이 프로젝트는 `from rag_evaluation import RAGEvaluator`로 가져오는 패키지입니다.
+검색과 답변 생성은 사용하는 프로젝트에서 처리합니다.
 
 기존 노트북과 동일하게 유사성/MLflow 점수는 4점 이상, Allganize 점수는
 1점이면 정답으로 투표합니다. 네 표 중 세 표 이상이 정답이어야 `O`이며,
@@ -136,3 +131,23 @@ python -m ruff check src tests
 
 테스트는 외부 LLM과 MLflow 호출을 대체하므로 API 키나 네트워크 없이 실행할 수
 있습니다. 실제 모델 호출과 MLflow 저장소 연동은 별도로 실행해 확인해야 합니다.
+
+## RAG 검색 클라이언트
+
+검색 파이프라인은 `src/rag_client`, 답변 평가는 `src/rag_evaluation`에서
+개발합니다. 두 패키지는 `pip install -e .`로 함께 설치됩니다.
+
+```python
+from rag_client import VectorRAGClient
+
+# vector_db는 인덱스 구축을 마친 VectorDB 인스턴스입니다.
+client = VectorRAGClient(vector_db)
+results = client.invoke("검색할 질문", top_k=5, candidate_k=20)
+```
+
+`rag_client`는 설정, 공통 타입, LLM 및 VectorDB 구현을 `ailib`에서 사용합니다.
+저장소의 `ailib` 하위 모듈과 해당 의존성이 필요하며, 별도 프로젝트에서는
+`ailib`도 Python에서 가져올 수 있도록 설정해야 합니다.
+
+기존 `ailib.agent.rag_client` import는 `rag_client`로 변경하세요.
+자세한 내용은 [RAG 클라이언트 사용법](src/rag_client/README.md)을 참고하세요.
